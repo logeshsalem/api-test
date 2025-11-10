@@ -1,107 +1,137 @@
-# test_openai_key.py
-import os
-import json
-import requests
 import streamlit as st
+import openai
+import os
+from typing import List, Dict
 
-OPENAI_MODELS_ENDPOINT = "https://api.openai.com/v1/models"
-TIMEOUT_SECONDS = 10
+st.set_page_config(page_title="OpenAI Streamlit Chat", page_icon="🤖", layout="wide")
 
-st.set_page_config(page_title="OpenAI API Key Tester", page_icon="🔑")
+st.title("🤖 Streamlit OpenAI Chat (Streaming)")
+st.caption("Enter your OpenAI API key (or set OPENAI_API_KEY in env) and start chatting. Responses stream as they arrive.")
 
-st.title("🔑 OpenAI API Key Tester")
-st.markdown(
-    "Paste an OpenAI API key below or choose to use the `OPENAI_API_KEY` environment variable. "
-    "This app will attempt a safe call to `/v1/models` to verify the key."
-)
+# --- Helpers -----------------------------------------------------------------
 
-use_env = st.checkbox("Use OPENAI_API_KEY environment variable (instead of pasting)", value=False)
+def get_api_key() -> str:
+    # prefer environment variable, otherwise allow user input
+    env_key = os.environ.get("OPENAI_API_KEY")
+    if env_key:
+        return env_key
+    return st.session_state.get("api_key_input", "")
 
-if use_env:
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
-        st.warning("Environment variable OPENAI_API_KEY not found.")
+
+def openai_client_setup(api_key: str):
+    openai.api_key = api_key
+
+
+# --- Sidebar / Settings -----------------------------------------------------
+with st.sidebar.form("settings"):
+    st.write("### Settings")
+    api_key_input = st.text_input("OpenAI API Key", type="password", key="api_key_input")
+    model = st.selectbox("Model", options=["gpt-4o-mini", "gpt-4o", "gpt-4", "gpt-3.5-turbo"], index=3)
+    max_tokens = st.number_input("Max tokens (response)", min_value=50, max_value=4096, value=512, step=50)
+    temperature = st.slider("Temperature", 0.0, 1.0, 0.2)
+    submit_settings = st.form_submit_button("Save")
+
+# initialize session state for chat history
+if "messages" not in st.session_state:
+    # store as list of dicts: {"role": "user"/"assistant"/"system", "content": str}
+    st.session_state["messages"] = [
+        {"role": "system", "content": "You are a helpful assistant."}
+    ]
+
+if "placeholder_id" not in st.session_state:
+    st.session_state["placeholder_id"] = None
+
+# Setup client
+api_key = get_api_key()
+if api_key:
+    openai_client_setup(api_key)
 else:
-    api_key = st.text_input("OpenAI API Key", type="password", placeholder="sk-... (never share this publicly)")
+    st.warning("No API key found. Please paste your OpenAI key in the sidebar or set OPENAI_API_KEY environment variable.")
 
-help_expand = st.expander("Why this endpoint?")
-help_expand.write(
-    "The `/v1/models` endpoint is a safe read-only call that returns the list of available models for the key. "
-    "If the key is valid you'll get a 200 response with JSON; if not you will typically get 401 Unauthorized or 403."
-)
-
-def test_key(key: str):
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "User-Agent": "openai-key-tester/1.0"
-    }
-    try:
-        resp = requests.get(OPENAI_MODELS_ENDPOINT, headers=headers, timeout=TIMEOUT_SECONDS)
-    except requests.exceptions.Timeout:
-        return {"ok": False, "error": "Request timed out."}
-    except requests.exceptions.RequestException as e:
-        return {"ok": False, "error": f"Network error: {e}"}
-
-    # Try to parse JSON safely
-    content_type = resp.headers.get("Content-Type", "")
-    body_preview = None
-    try:
-        if "application/json" in content_type:
-            body_preview = resp.json()
-        else:
-            body_preview = resp.text[:2000]
-    except Exception:
-        body_preview = resp.text[:2000]
-
-    if resp.status_code == 200:
-        return {"ok": True, "status_code": resp.status_code, "body": body_preview}
-    else:
-        # common cases: 401 invalid, 429 rate limit, 403 forbidden
-        return {"ok": False, "status_code": resp.status_code, "body": body_preview}
-
-st.write("---")
-
+# --- Chat UI ----------------------------------------------------------------
 col1, col2 = st.columns([3, 1])
+
 with col1:
-    if st.button("🔎 Test Key"):
-        if not api_key:
-            st.error("Please provide an API key (or set OPENAI_API_KEY and check the box).")
-        else:
-            with st.spinner("Testing key..."):
-                result = test_key(api_key)
-            if result["ok"]:
-                st.success(f"✅ Key is valid — HTTP {result['status_code']}")
-                st.subheader("Response preview")
-                st.json(result["body"])
+    chat_container = st.container()
+    with chat_container:
+        for msg in st.session_state["messages"]:
+            if msg["role"] == "system":
+                # don't display system messages in chat window
+                continue
+            if msg["role"] == "user":
+                st.markdown(f"**You:** {msg['content']}")
             else:
-                code = result.get("status_code")
-                if code:
-                    if code == 401:
-                        st.error("❌ Unauthorized (HTTP 401): The API key is invalid or revoked.")
-                    elif code == 403:
-                        st.error("❌ Forbidden (HTTP 403): The key may lack permissions.")
-                    elif code == 429:
-                        st.error("⚠️ Rate limited (HTTP 429): Too many requests for this key.")
-                    else:
-                        st.error(f"❌ Request failed — HTTP {code}")
-                else:
-                    st.error("❌ Request failed.")
-                st.subheader("Server response (preview)")
-                st.json(result["body"] if isinstance(result.get("body"), dict) else {"text": result.get("body")})
+                st.markdown(f"**Assistant:** {msg['content']}")
+
+    # input area
+    user_input = st.text_area("", placeholder="Type your message here and press Ctrl+Enter (or click Send)", key="user_input", height=120)
+    send = st.button("Send")
+    clear = st.button("Clear chat")
+
 with col2:
-    st.markdown("#### Quick help")
-    st.write(
-        "- Use a **test key** (not your production key you can't share).  \n"
-        "- If using env var: `export OPENAI_API_KEY='sk-...'` (Linux/Mac) or set via system environment on Windows.  \n"
-        "- If you get 401: confirm the key hasn't expired/revoked.  \n"
-        "- If you get network errors: check internet access or that your environment blocks outbound HTTPS."
-    )
+    st.write("### Controls")
+    if st.button("Export chat as JSON"):
+        import json
+        st.download_button("Download chat JSON", data=json.dumps(st.session_state["messages"], indent=2), file_name="chat_history.json")
+    st.write("---")
+    st.write("Current model: ", model)
+    st.write("Max tokens: ", max_tokens)
+    st.write("Temperature: ", temperature)
 
-st.write("---")
-st.markdown("### Advanced: curl equivalent")
-st.code(
-    "curl https://api.openai.com/v1/models -H \"Authorization: Bearer $OPENAI_API_KEY\"",
-    language="bash",
-)
+if clear:
+    st.session_state["messages"] = [{"role": "system", "content": "You are a helpful assistant."}]
+    st.experimental_rerun()
 
-st.caption("This tool DOES NOT log or send your key anywhere — it runs locally in your machine when you run Streamlit.")
+# --- Send message & stream response -----------------------------------------
+if send and user_input.strip() != "":
+    # append user message
+    st.session_state["messages"].append({"role": "user", "content": user_input})
+
+    # prepare assistant placeholder for streaming
+    placeholder = st.empty()
+    assistant_content = ""
+    st.session_state["messages"].append({"role": "assistant", "content": assistant_content})
+
+    # stream response from OpenAI
+    try:
+        # Use ChatCompletion streaming interface
+        # NOTE: this code uses the classic openai.ChatCompletion.stream generator
+        resp_stream = openai.ChatCompletion.create(
+            model=model,
+            messages=st.session_state["messages"],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stream=True,
+        )
+
+        for chunk in resp_stream:
+            # each chunk is a dict-like object; extract delta
+            if not chunk:
+                continue
+            # older openai library formats: chunk['choices'][0]['delta'].get('content', '')
+            delta = ""
+            try:
+                delta_obj = chunk["choices"][0]["delta"]
+                delta = delta_obj.get("content") or ""
+            except Exception:
+                # some transports return a text field
+                delta = chunk.get("text", "")
+
+            if delta:
+                assistant_content += delta
+                # replace last assistant message in session
+                st.session_state["messages"][-1]["content"] = assistant_content
+                # update on screen (render markdown to preserve newlines)
+                placeholder.markdown(f"**Assistant:** {assistant_content}")
+
+    except Exception as e:
+        placeholder.markdown(f"**Assistant:** Error generating response: {e}")
+        st.session_state["messages"][-1]["content"] = f"Error: {e}"
+
+    # clear input box
+    st.session_state["user_input"] = ""
+    st.experimental_rerun()
+
+# small friendly footer
+st.markdown("---")
+st.caption("Built with Streamlit + OpenAI. Make sure your key has permission for the selected model.")
