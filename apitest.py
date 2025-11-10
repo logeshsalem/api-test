@@ -1,137 +1,107 @@
+# test_openai_key.py
+import os
+import json
+import requests
 import streamlit as st
-from openai import OpenAI, APIError
 
-# --- Configuration ---
-# Use the modern gpt-3.5-turbo model for testing
-TEST_MODEL = "gpt-3.5-turbo" 
+OPENAI_MODELS_ENDPOINT = "https://api.openai.com/v1/models"
+TIMEOUT_SECONDS = 10
 
-def test_openai_key(api_key: str, prompt: str):
-    """
-    Attempts to initialize the OpenAI client and make a test API call.
-    Returns (success_status, message).
-    """
-    if not api_key:
-        return False, "Please enter your OpenAI API Key."
-    
-    if not prompt:
-        return False, "Please enter a test prompt."
+st.set_page_config(page_title="OpenAI API Key Tester", page_icon="🔑")
 
-    try:
-        # 1. Initialize the client with the provided key
-        # The base URL is explicitly set to ensure robustness, though usually optional.
-        client = OpenAI(
-            api_key=api_key,
-        )
-        
-        # 2. Make a small, low-cost API call
-        st.info(f"Attempting to connect to OpenAI and test with model: **{TEST_MODEL}**...")
-        
-        # The 'stream=True' is used here to demonstrate real-time output, but 
-        # using client.chat.completions.create() without streaming is often simpler for a single test.
-        # Let's use a non-streaming call for robustness in testing the key itself.
-        
-        response = client.chat.completions.create(
-            model=TEST_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a concise API key tester."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=50, # Keep the cost low
-            temperature=0.1
-        )
-        
-        # 3. Success check
-        generated_text = response.choices[0].message.content.strip()
-        
-        # Check if text was returned and the key is functional
-        if generated_text:
-            return (
-                True, 
-                f"**SUCCESS!** The API key is valid and the `{TEST_MODEL}` model responded.\n\n"
-                f"**Test Response:**\n\n"
-                f"{generated_text}"
-            )
-        else:
-            return (
-                True, 
-                "**SUCCESS!** The API key is valid, but the model returned no content (this is rare, but usually indicates the key works)."
-            )
-
-    except APIError as e:
-        # Handle specific OpenAI errors (e.g., Invalid API Key, Rate Limit, Model not found)
-        error_type = type(e).__name__
-        if error_type == "AuthenticationError":
-            return False, f"**ERROR:** Authentication Failed (Status: {e.status_code}). The API key is likely **invalid** or incorrectly formatted. Check for typos or leading/trailing spaces."
-        elif error_type == "RateLimitError":
-            return False, f"**ERROR:** Rate Limit Exceeded. The key is likely **valid**, but you are sending too many requests too quickly, or have exceeded your quota."
-        else:
-            return False, f"**ERROR:** An OpenAI API Error occurred: {error_type}. Message: {e}"
-    
-    except Exception as e:
-        # Handle other exceptions (e.g., network issues, library initialization problems)
-        return False, f"**UNEXPECTED ERROR:** Could not complete the request. Check your network or permissions. Error: {e}"
-
-
-# --- Streamlit UI Layout ---
-
-st.set_page_config(
-    page_title="OpenAI Key Validator",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-st.title("🔑 OpenAI API Key Validator")
+st.title("🔑 OpenAI API Key Tester")
 st.markdown(
-    """
-    Enter your OpenAI API key and a test prompt below. This app will attempt a simple, 
-    low-cost call to the `gpt-3.5-turbo` model to verify the key's validity and functionality.
-    """
+    "Paste an OpenAI API key below or choose to use the `OPENAI_API_KEY` environment variable. "
+    "This app will attempt a safe call to `/v1/models` to verify the key."
 )
 
-# 1. API Key Input (Sidebar is great for credentials)
-st.sidebar.header("API Key Input")
-api_key_input = st.sidebar.text_input(
-    "Your OpenAI API Key",
-    type="password",
-    help="Your key starts with 'sk-'. It is not stored and is only used for the test request."
+use_env = st.checkbox("Use OPENAI_API_KEY environment variable (instead of pasting)", value=False)
+
+if use_env:
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        st.warning("Environment variable OPENAI_API_KEY not found.")
+else:
+    api_key = st.text_input("OpenAI API Key", type="password", placeholder="sk-... (never share this publicly)")
+
+help_expand = st.expander("Why this endpoint?")
+help_expand.write(
+    "The `/v1/models` endpoint is a safe read-only call that returns the list of available models for the key. "
+    "If the key is valid you'll get a 200 response with JSON; if not you will typically get 401 Unauthorized or 403."
 )
 
-st.sidebar.markdown(
-    """
-    ---
-    ### How to Run:
-    1. Save the code as `key_tester.py`.
-    2. Run in your terminal: `streamlit run key_tester.py`
-    """
-)
+def test_key(key: str):
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "User-Agent": "openai-key-tester/1.0"
+    }
+    try:
+        resp = requests.get(OPENAI_MODELS_ENDPOINT, headers=headers, timeout=TIMEOUT_SECONDS)
+    except requests.exceptions.Timeout:
+        return {"ok": False, "error": "Request timed out."}
+    except requests.exceptions.RequestException as e:
+        return {"ok": False, "error": f"Network error: {e}"}
 
+    # Try to parse JSON safely
+    content_type = resp.headers.get("Content-Type", "")
+    body_preview = None
+    try:
+        if "application/json" in content_type:
+            body_preview = resp.json()
+        else:
+            body_preview = resp.text[:2000]
+    except Exception:
+        body_preview = resp.text[:2000]
 
-# 2. Test Prompt Input
-st.header("Test Query")
-prompt_input = st.text_area(
-    "Enter a short test prompt:",
-    value="Write a single, encouraging sentence about testing your code.",
-    height=100,
-    help="The prompt used for the test API call."
-)
-
-# 3. Test Button
-if st.button("🚀 Test API Key"):
-    # Clear previous messages
-    st.session_state.result_placeholder = None 
-    
-    # Run the test
-    success, message = test_openai_key(api_key_input, prompt_input)
-    
-    # Display the result
-    if success:
-        st.success(message)
+    if resp.status_code == 200:
+        return {"ok": True, "status_code": resp.status_code, "body": body_preview}
     else:
-        st.error(message)
+        # common cases: 401 invalid, 429 rate limit, 403 forbidden
+        return {"ok": False, "status_code": resp.status_code, "body": body_preview}
 
-# Initialize a placeholder for the result display area
-if 'result_placeholder' not in st.session_state:
-    st.session_state.result_placeholder = st.empty()
+st.write("---")
 
-st.markdown("---")
-st.caption("Powered by Streamlit and OpenAI.")
+col1, col2 = st.columns([3, 1])
+with col1:
+    if st.button("🔎 Test Key"):
+        if not api_key:
+            st.error("Please provide an API key (or set OPENAI_API_KEY and check the box).")
+        else:
+            with st.spinner("Testing key..."):
+                result = test_key(api_key)
+            if result["ok"]:
+                st.success(f"✅ Key is valid — HTTP {result['status_code']}")
+                st.subheader("Response preview")
+                st.json(result["body"])
+            else:
+                code = result.get("status_code")
+                if code:
+                    if code == 401:
+                        st.error("❌ Unauthorized (HTTP 401): The API key is invalid or revoked.")
+                    elif code == 403:
+                        st.error("❌ Forbidden (HTTP 403): The key may lack permissions.")
+                    elif code == 429:
+                        st.error("⚠️ Rate limited (HTTP 429): Too many requests for this key.")
+                    else:
+                        st.error(f"❌ Request failed — HTTP {code}")
+                else:
+                    st.error("❌ Request failed.")
+                st.subheader("Server response (preview)")
+                st.json(result["body"] if isinstance(result.get("body"), dict) else {"text": result.get("body")})
+with col2:
+    st.markdown("#### Quick help")
+    st.write(
+        "- Use a **test key** (not your production key you can't share).  \n"
+        "- If using env var: `export OPENAI_API_KEY='sk-...'` (Linux/Mac) or set via system environment on Windows.  \n"
+        "- If you get 401: confirm the key hasn't expired/revoked.  \n"
+        "- If you get network errors: check internet access or that your environment blocks outbound HTTPS."
+    )
+
+st.write("---")
+st.markdown("### Advanced: curl equivalent")
+st.code(
+    "curl https://api.openai.com/v1/models -H \"Authorization: Bearer $OPENAI_API_KEY\"",
+    language="bash",
+)
+
+st.caption("This tool DOES NOT log or send your key anywhere — it runs locally in your machine when you run Streamlit.")
