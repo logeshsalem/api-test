@@ -69,7 +69,13 @@ with col2:
 
 if clear:
     st.session_state["messages"] = [{"role": "system", "content": "You are a helpful assistant."}]
-    st.experimental_rerun()
+    # Clear the input box and let Streamlit naturally re-run on the next interaction
+    try:
+        st.session_state["user_input"] = ""
+    except Exception:
+        pass
+
+# --- Send message & stream response (OpenAI >=1.0.0) -------------------------
 
 # --- Send message & stream response (OpenAI >=1.0.0) -------------------------
 if send and user_input.strip() != "" and client is not None:
@@ -132,7 +138,9 @@ if send and user_input.strip() != "" and client is not None:
         st.session_state["user_input"] = ""
     except Exception:
         pass
-    st.experimental_rerun()
+    # Avoid calling st.experimental_rerun() which may raise in some Streamlit versions/environments.
+    # The UI will reflect updated session_state on the next interaction automatically.
+
 
 st.markdown("---")
 st.caption("Built with Streamlit + OpenAI SDK >= 1.0.0. Make sure your key has permission for the selected model.")
