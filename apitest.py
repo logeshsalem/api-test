@@ -86,22 +86,52 @@ if send and user_input.strip() != "" and client is not None:
             max_tokens=max_tokens,
             temperature=temperature,
         ) as stream:
+            # The stream yields event objects. Different versions of the SDK expose
+            # deltas in different attributes, so try a few methods to extract text.
             for event in stream:
-                if event.type == "message.delta" and event.delta.get("content"):
-                    delta = event.delta["content"]
+                delta = None
+                # 1) new SDK: event.delta is a dict with 'content'
+                try:
+                    if hasattr(event, "delta") and isinstance(event.delta, dict):
+                        delta = event.delta.get("content")
+                except Exception:
+                    delta = None
+
+                # 2) older/dict-style: event.get("choices")[0]["delta"].get("content")
+                if delta is None:
+                    try:
+                        if hasattr(event, "get"):
+                            choices = event.get("choices")
+                            if choices:
+                                delta = choices[0].get("delta", {}).get("content")
+                    except Exception:
+                        delta = None
+
+                # 3) fallback: some transports expose text directly
+                if delta is None:
+                    try:
+                        delta = getattr(event, "text", None)
+                    except Exception:
+                        delta = None
+
+                if delta:
                     assistant_content += delta
                     st.session_state["messages"][-1]["content"] = assistant_content
                     placeholder.markdown(f"**Assistant:** {assistant_content}")
 
-            final = stream.get_final_message()
-            if final:
-                st.session_state["messages"][-1]["content"] = final.content[0].text
+            # Do not call any non-existent helper like get_final_message(); rely on the
+            # accumulated assistant_content instead.
 
     except Exception as e:
         placeholder.markdown(f"**Assistant:** Error generating response: {e}")
         st.session_state["messages"][-1]["content"] = f"Error: {e}"
 
-    st.session_state["user_input"] = ""
+    # clear input box (wrap in try/except because updating session_state inside
+    # certain Streamlit contexts can raise; we ignore that error safely)
+    try:
+        st.session_state["user_input"] = ""
+    except Exception:
+        pass
     st.experimental_rerun()
 
 st.markdown("---")
