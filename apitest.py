@@ -75,10 +75,9 @@ if clear:
     except Exception:
         pass
 
-# --- Send message & stream response (OpenAI >=1.0.0) -------------------------
-
-# --- Send message & stream response (OpenAI >=1.0.0) -------------------------
+# --- Send message & get response (compatible and robust) -------------------
 if send and user_input.strip() != "" and client is not None:
+    # append user message
     st.session_state["messages"].append({"role": "user", "content": user_input})
 
     placeholder = st.empty()
@@ -86,61 +85,116 @@ if send and user_input.strip() != "" and client is not None:
     st.session_state["messages"].append({"role": "assistant", "content": assistant_content})
 
     try:
-        with client.chat.completions.stream(
-            model=model,
-            messages=st.session_state["messages"],
-            max_tokens=max_tokens,
-            temperature=temperature,
-        ) as stream:
-            # The stream yields event objects. Different versions of the SDK expose
-            # deltas in different attributes, so try a few methods to extract text.
-            for event in stream:
-                delta = None
-                # 1) new SDK: event.delta is a dict with 'content'
-                try:
-                    if hasattr(event, "delta") and isinstance(event.delta, dict):
-                        delta = event.delta.get("content")
-                except Exception:
+        # Attempt streaming first (best-effort). If streaming fails or yields nothing,
+        # fall back to a single non-streaming request so the user always gets a reply.
+        streamed = False
+        try:
+            with client.chat.completions.stream(
+                model=model,
+                messages=st.session_state["messages"],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            ) as stream:
+                for event in stream:
+                    # try multiple ways to extract delta text
                     delta = None
-
-                # 2) older/dict-style: event.get("choices")[0]["delta"].get("content")
-                if delta is None:
                     try:
-                        if hasattr(event, "get"):
-                            choices = event.get("choices")
-                            if choices:
-                                delta = choices[0].get("delta", {}).get("content")
+                        if hasattr(event, "delta") and isinstance(event.delta, dict):
+                            delta = event.delta.get("content")
                     except Exception:
                         delta = None
 
-                # 3) fallback: some transports expose text directly
-                if delta is None:
-                    try:
-                        delta = getattr(event, "text", None)
-                    except Exception:
-                        delta = None
+                    if delta is None:
+                        try:
+                            if hasattr(event, "get"):
+                                choices = event.get("choices")
+                                if choices:
+                                    delta = choices[0].get("delta", {}).get("content")
+                        except Exception:
+                            delta = None
 
-                if delta:
-                    assistant_content += delta
-                    st.session_state["messages"][-1]["content"] = assistant_content
-                    placeholder.markdown(f"**Assistant:** {assistant_content}")
+                    if delta is None:
+                        try:
+                            delta = getattr(event, "text", None)
+                        except Exception:
+                            delta = None
 
-            # Do not call any non-existent helper like get_final_message(); rely on the
-            # accumulated assistant_content instead.
+                    if delta:
+                        assistant_content += delta
+                        st.session_state["messages"][-1]["content"] = assistant_content
+                        placeholder.markdown(f"**Assistant:** {assistant_content}")
+                        streamed = True
+        except Exception:
+            streamed = False
+
+        # If streaming didn't produce content, use a non-streaming call as a fallback.
+        if not streamed:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=st.session_state["messages"],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+
+            # Try various ways to extract assistant text from response object/dict
+            content = None
+            try:
+                # 1) dict-like responses
+                if hasattr(resp, "get"):
+                    choices = resp.get("choices")
+                    if choices and isinstance(choices, list):
+                        first = choices[0]
+                        # older shape: first["message"]["content"] or first["message"]["content"][0]["text"]
+                        if isinstance(first, dict):
+                            msg = first.get("message") or first.get("message", {})
+                            if isinstance(msg, dict):
+                                # message.content might be a list of parts
+                                content = msg.get("content")
+                                if isinstance(content, list) and len(content) > 0:
+                                    # join parts
+                                    content = "".join([c.get("text", "") if isinstance(c, dict) else str(c) for c in content])
+                            # fallback to text
+                            if not content:
+                                content = first.get("text")
+                # 2) object-like responses (SDK objects)
+                if not content and hasattr(resp, "choices"):
+                    ch = getattr(resp, "choices")
+                    if ch and len(ch) > 0:
+                        first = ch[0]
+                        # try common attributes
+                        msg = getattr(first, "message", None)
+                        if msg:
+                            content = getattr(msg, "content", None) or getattr(msg, "text", None)
+                        if not content:
+                            content = getattr(first, "text", None)
+            except Exception:
+                content = None
+
+            # final fallback: stringify response
+            if not content:
+                try:
+                    content = str(resp)
+                except Exception:
+                    content = "(no text could be extracted from the model response)"
+
+            assistant_content = content
+            st.session_state["messages"][-1]["content"] = assistant_content
+            placeholder.markdown(f"**Assistant:** {assistant_content}")
 
     except Exception as e:
         placeholder.markdown(f"**Assistant:** Error generating response: {e}")
         st.session_state["messages"][-1]["content"] = f"Error: {e}"
 
-    # clear input box (wrap in try/except because updating session_state inside
-    # certain Streamlit contexts can raise; we ignore that error safely)
+    # clear input box (safe)
     try:
         st.session_state["user_input"] = ""
     except Exception:
         pass
-    # Avoid calling st.experimental_rerun() which may raise in some Streamlit versions/environments.
-    # The UI will reflect updated session_state on the next interaction automatically.
 
+# If user clicked send but client isn't configured, show an explanation
+if send and client is None:
+    st.warning("Cannot send message because OpenAI client is not configured. Provide an API key in the sidebar or set OPENAI_API_KEY environment variable.")
 
 st.markdown("---")
+st.caption("Built with Streamlit + OpenAI SDK >= 1.0.0. Make sure your key has permission for the selected model.")
 st.caption("Built with Streamlit + OpenAI SDK >= 1.0.0. Make sure your key has permission for the selected model.")
