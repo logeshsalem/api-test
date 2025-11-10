@@ -1,14 +1,6 @@
 import streamlit as st
 import os
-from typing import List, Dict
-
-# Try to import the OpenAI library. If it's not available, we'll handle it gracefully in the UI.
-try:
-    import openai
-    OPENAI_INSTALLED = True
-except Exception:
-    openai = None  # type: ignore
-    OPENAI_INSTALLED = False
+from openai import OpenAI
 
 st.set_page_config(page_title="OpenAI Streamlit Chat", page_icon="🤖", layout="wide")
 
@@ -18,18 +10,10 @@ st.caption("Enter your OpenAI API key (or set OPENAI_API_KEY in env) and start c
 # --- Helpers -----------------------------------------------------------------
 
 def get_api_key() -> str:
-    # prefer environment variable, otherwise allow user input
     env_key = os.environ.get("OPENAI_API_KEY")
     if env_key:
         return env_key
     return st.session_state.get("api_key_input", "")
-
-
-def openai_client_setup(api_key: str):
-    if not OPENAI_INSTALLED:
-        return
-    # For the official openai library set the api key
-    openai.api_key = api_key
 
 
 # --- Sidebar / Settings -----------------------------------------------------
@@ -43,21 +27,17 @@ with st.sidebar.form("settings"):
 
 # initialize session state for chat history
 if "messages" not in st.session_state:
-    # store as list of dicts: {"role": "user"/"assistant"/"system", "content": str}
     st.session_state["messages"] = [
         {"role": "system", "content": "You are a helpful assistant."}
     ]
 
-if "placeholder_id" not in st.session_state:
-    st.session_state["placeholder_id"] = None
-
-# Setup client
+# Setup OpenAI client
 api_key = get_api_key()
 if api_key:
-    openai_client_setup(api_key)
+    client = OpenAI(api_key=api_key)
 else:
-    # only show the warning once in the main area (we'll also show guidance for installing openai below)
-    pass
+    st.warning("No API key found. Please paste your OpenAI key in the sidebar or set OPENAI_API_KEY environment variable.")
+    client = None
 
 # --- Chat UI ----------------------------------------------------------------
 col1, col2 = st.columns([3, 1])
@@ -67,14 +47,12 @@ with col1:
     with chat_container:
         for msg in st.session_state["messages"]:
             if msg["role"] == "system":
-                # don't display system messages in chat window
                 continue
             if msg["role"] == "user":
                 st.markdown(f"**You:** {msg['content']}")
             else:
                 st.markdown(f"**Assistant:** {msg['content']}")
 
-    # input area
     user_input = st.text_area("", placeholder="Type your message here and press Ctrl+Enter (or click Send)", key="user_input", height=120)
     send = st.button("Send")
     clear = st.button("Clear chat")
@@ -93,67 +71,38 @@ if clear:
     st.session_state["messages"] = [{"role": "system", "content": "You are a helpful assistant."}]
     st.experimental_rerun()
 
-# If OpenAI package isn't installed, show helpful instructions and prevent sending
-if not OPENAI_INSTALLED:
-    st.error("The Python package `openai` is not installed in this environment.\n\nTo fix this: run `pip install openai` in the same Python environment you use to run Streamlit.`")
-    st.info("If you're deploying to Streamlit Cloud, include a `requirements.txt` with at least:\n\nstreamlit\nopenai\n")
-    st.caption("After installing the package, rerun the app. You can still craft messages above but sending is disabled until `openai` is available.")
-
-# --- Send message & stream response -----------------------------------------
-# Only attempt to send if openai package is installed and user clicked send
-if OPENAI_INSTALLED and send and user_input.strip() != "":
-    # append user message
+# --- Send message & stream response (OpenAI >=1.0.0) -------------------------
+if send and user_input.strip() != "" and client is not None:
     st.session_state["messages"].append({"role": "user", "content": user_input})
 
-    # prepare assistant placeholder for streaming
     placeholder = st.empty()
     assistant_content = ""
     st.session_state["messages"].append({"role": "assistant", "content": assistant_content})
 
-    # stream response from OpenAI
     try:
-        # Use ChatCompletion streaming interface
-        # NOTE: this code uses the classic openai.ChatCompletion.create(..., stream=True) pattern.
-        # Depending on your `openai` package version you may need to adapt this.
-        resp_stream = openai.ChatCompletion.create(
+        with client.chat.completions.stream(
             model=model,
             messages=st.session_state["messages"],
             max_tokens=max_tokens,
             temperature=temperature,
-            stream=True,
-        )
+        ) as stream:
+            for event in stream:
+                if event.type == "message.delta" and event.delta.get("content"):
+                    delta = event.delta["content"]
+                    assistant_content += delta
+                    st.session_state["messages"][-1]["content"] = assistant_content
+                    placeholder.markdown(f"**Assistant:** {assistant_content}")
 
-        for chunk in resp_stream:
-            # each chunk is a dict-like object; extract delta
-            if not chunk:
-                continue
-            delta = ""
-            try:
-                delta_obj = chunk["choices"][0]["delta"]
-                delta = delta_obj.get("content") or ""
-            except Exception:
-                # some transports return a text field
-                delta = chunk.get("text", "")
-
-            if delta:
-                assistant_content += delta
-                # replace last assistant message in session
-                st.session_state["messages"][-1]["content"] = assistant_content
-                # update on screen (render markdown to preserve newlines)
-                placeholder.markdown(f"**Assistant:** {assistant_content}")
+            final = stream.get_final_message()
+            if final:
+                st.session_state["messages"][-1]["content"] = final.content[0].text
 
     except Exception as e:
         placeholder.markdown(f"**Assistant:** Error generating response: {e}")
         st.session_state["messages"][-1]["content"] = f"Error: {e}"
 
-    # clear input box
     st.session_state["user_input"] = ""
     st.experimental_rerun()
 
-# If user clicked send but openai isn't installed, show an explanation (instead of crashing)
-if not OPENAI_INSTALLED and send:
-    st.warning("Cannot send message because `openai` is not installed. Follow the instructions shown above to fix the environment and re-run the app.")
-
-# small friendly footer
 st.markdown("---")
-st.caption("Built with Streamlit + OpenAI. Make sure your key has permission for the selected model.")
+st.caption("Built with Streamlit + OpenAI SDK >= 1.0.0. Make sure your key has permission for the selected model.")
